@@ -10,9 +10,6 @@ public sealed class OrderService(OrderDependencies dependencies)
 {
     private readonly ConcurrentDictionary<Guid, Order> _orders = new();
 
-    // One action at a time per order, so two concurrent requests can't both authorize or both void.
-    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _locks = new();
-
     public Order Create()
     {
         var order = new Order(Guid.NewGuid(), dependencies.Now);
@@ -24,6 +21,7 @@ public sealed class OrderService(OrderDependencies dependencies)
 
     /// <summary>Returns null if the order doesn't exist.</summary>
     /// <exception cref="InvalidOrderTransitionException">The current state doesn't allow this action.</exception>
+    /// <exception cref="OrderOutcomeUnknownException">The gateway gave no definitive answer; the order is unchanged.</exception>
     public Task<Order?> AuthorizePaymentAsync(Guid id) => RunExclusiveAsync(id, order => order.AuthorizePaymentAsync(dependencies));
 
     /// <inheritdoc cref="AuthorizePaymentAsync"/>
@@ -36,8 +34,7 @@ public sealed class OrderService(OrderDependencies dependencies)
             return null;
         }
 
-        var orderLock = _locks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
-        await orderLock.WaitAsync();
+        await order.Lock.WaitAsync();
         try
         {
             await action(order);
@@ -45,7 +42,7 @@ public sealed class OrderService(OrderDependencies dependencies)
         }
         finally
         {
-            orderLock.Release();
+            order.Lock.Release();
         }
     }
 }

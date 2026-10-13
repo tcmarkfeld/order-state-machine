@@ -39,19 +39,26 @@ public sealed class InitializedState : OrderStateBase
 
     public override async Task AuthorizePaymentAsync(Order order, OrderDependencies dependencies)
     {
-        // An exception or timeout here is left to propagate: the order stays Initialized and the
-        // retry is safe because the order ID is the gateway's idempotency key.
-        var result = await dependencies.CallAsync(ct => dependencies.Payments.AuthorizeAsync(order.Id, ct));
+        var result = await dependencies.CallSafelyAsync(ct => dependencies.Payments.AuthorizeAsync(order.Id, ct));
 
-        if (result.Succeeded)
+        switch (result)
         {
-            order.AuthorizationId = result.Reference;
-            order.MoveTo(new PaymentAuthorizedState(), dependencies.Now, $"Payment authorized ({result.Reference})");
-        }
-        else
-        {
-            // Nothing was charged, so rejecting is the whole recovery.
-            order.MoveTo(new RejectedState(), dependencies.Now, $"Payment declined: {result.Error}");
+            case { Succeeded: true, Reference: { } authorizationId }:
+                order.AuthorizationId = authorizationId;
+                order.MoveTo(new PaymentAuthorizedState(), dependencies.Now, $"Payment authorized ({authorizationId})");
+                break;
+
+            case { Outcome: OperationOutcome.Failed }:
+                // Nothing was charged, so rejecting is the whole recovery.
+                order.MoveTo(new RejectedState(), dependencies.Now, $"Payment declined: {result.Error}");
+                break;
+
+            default:
+                // Unknown, or a success without the ID we'd need to void it later. A hold may exist, so
+                // this is not a decline. Stay Initialized: a retry with the same idempotency key settles it.
+                var reason = result.Succeeded ? "authorization ID missing" : result.Error;
+                dependencies.Logger.LogWarning("Authorization outcome unknown for order {OrderId}: {Reason}", order.Id, reason);
+                throw new OrderOutcomeUnknownException($"Authorization outcome unknown: {reason}. Retry to settle it.");
         }
     }
 }

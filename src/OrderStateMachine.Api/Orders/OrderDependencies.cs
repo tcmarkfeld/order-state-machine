@@ -32,7 +32,7 @@ public sealed class OrderDependencies(
     /// cancel a void halfway through. Cancelling only stops our side: a request that already
     /// reached the provider may still be processed, which is why a timeout is an unknown outcome.
     /// </remarks>
-    public async Task<OperationResult> CallAsync(Func<CancellationToken, Task<OperationResult>> call)
+    private async Task<OperationResult> CallAsync(Func<CancellationToken, Task<OperationResult>> call)
     {
         using var timeout = new CancellationTokenSource(GatewayTimeout, clock);
         try

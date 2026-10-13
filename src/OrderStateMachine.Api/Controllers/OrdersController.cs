@@ -26,6 +26,7 @@ public sealed class OrdersController(OrderService orders) : ControllerBase
     [ProducesResponseType<OrderResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status503ServiceUnavailable)]
     public Task<ActionResult<OrderResponse>> AuthorizePayment(Guid id) => RunAsync(() => orders.AuthorizePaymentAsync(id));
 
     /// <summary>PaymentAuthorized → Complete, Cancelled or NeedsAttention depending on how completion and recovery go.</summary>
@@ -33,7 +34,7 @@ public sealed class OrdersController(OrderService orders) : ControllerBase
     [ProducesResponseType<OrderResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
-    public Task<ActionResult<OrderResponse>> CompletePayment(Guid id) => RunAsync(() => orders.CompleteAsync(id));
+    public Task<ActionResult<OrderResponse>> Complete(Guid id) => RunAsync(() => orders.CompleteAsync(id));
 
     private async Task<ActionResult<OrderResponse>> RunAsync(Func<Task<Order?>> action)
     {
@@ -45,6 +46,10 @@ public sealed class OrdersController(OrderService orders) : ControllerBase
         {
             return Problem(ex.Message, statusCode: StatusCodes.Status409Conflict);
         }
+        catch (OrderOutcomeUnknownException ex)
+        {
+            return Problem(ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
     }
 }
 
@@ -54,6 +59,10 @@ public sealed record OrderResponse(
     string? AuthorizationId,
     IReadOnlyList<StateTransition> History)
 {
-    public static OrderResponse From(Order order) =>
-        new(order.Id, order.State, order.AuthorizationId, order.History);
+    public static OrderResponse From(Order order)
+    {
+        // Read History once so State and History come from the same snapshot.
+        var history = order.History;
+        return new(order.Id, history[^1].To, order.AuthorizationId, history);
+    }
 }
