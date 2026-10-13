@@ -1,6 +1,6 @@
 # Order State Machine
 
-An ASP.NET Core (.NET 10) service for checkout orders, where failure recovery depends on the stage that failed.
+A .NET 10 service for checkout orders, where failure recovery depends on the stage that failed.
 
 ```
 Initialized ──authorize──┬─ declined ─────────────────────► Rejected
