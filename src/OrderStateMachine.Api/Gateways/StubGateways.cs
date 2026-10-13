@@ -20,7 +20,7 @@ public sealed class StubPaymentGateway(StubOptions options) : IPaymentGateway
 
     public Task<OperationResult> VoidAsync(string authorizationId, CancellationToken cancellationToken) =>
         Task.FromResult(options.FailVoid
-            ? OperationResult.Failure("Payment gateway timed out")
+            ? OperationResult.Failure("Void rejected by payment provider")
             : OperationResult.Success(authorizationId));
 }
 

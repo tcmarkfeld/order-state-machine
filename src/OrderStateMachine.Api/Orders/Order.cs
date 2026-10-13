@@ -32,6 +32,12 @@ public sealed record StateTransition(OrderState? From, OrderState To, DateTimeOf
 public sealed class InvalidOrderTransitionException(string message) : InvalidOperationException(message);
 
 /// <summary>
+/// A gateway gave no definitive answer, so the order was left in its current state. Retrying is
+/// safe because the order ID is the gateway's idempotency key.
+/// </summary>
+public sealed class OrderOutcomeUnknownException(string message) : Exception(message);
+
+/// <summary>
 /// The state machine's context. It holds the current <see cref="IOrderState"/> and forwards every
 /// action to it, so what an action does (or whether it's allowed at all) depends on the state.
 /// </summary>
@@ -49,13 +55,17 @@ public sealed class Order
 
     public string? AuthorizationId { get; internal set; }
 
-    public OrderState State => _state.Name;
+    /// <summary>Derived from <see cref="History"/> so a reader can't see a state and history that disagree.</summary>
+    public OrderState State => History[^1].To;
 
     /// <summary>
     /// Every state the order has been in, oldest first. Immutable so readers always get a
     /// snapshot that can't change while they enumerate it.
     /// </summary>
     public ImmutableList<StateTransition> History { get; private set; }
+
+    /// <summary>One action at a time per order, so two concurrent requests can't both authorize or both void.</summary>
+    internal SemaphoreSlim Lock { get; } = new(1, 1);
 
     public Task AuthorizePaymentAsync(OrderDependencies dependencies) => _state.AuthorizePaymentAsync(this, dependencies);
 

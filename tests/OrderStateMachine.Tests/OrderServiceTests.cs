@@ -69,7 +69,7 @@ public class OrderServiceTests
     public async Task CompletionFails_VoidFails_NeedsAttention()
     {
         _fulfillment.Complete = () => OperationResult.Failure("Tickets no longer available");
-        _payments.Void = () => OperationResult.Failure("Payment gateway timed out");
+        _payments.Void = () => OperationResult.Failure("Void rejected by payment provider");
         var order = _service.Create();
 
         await _service.AuthorizePaymentAsync(order.Id);
@@ -78,7 +78,7 @@ public class OrderServiceTests
         Assert.Equal(OrderState.NeedsAttention, order.State);
         Assert.Equal(["auth_123"], _payments.VoidCalls);
         Assert.Contains("Tickets no longer available", order.History[^1].Reason);
-        Assert.Contains("Payment gateway timed out", order.History[^1].Reason);
+        Assert.Contains("Void rejected by payment provider", order.History[^1].Reason);
     }
 
     [Fact]
@@ -134,12 +134,35 @@ public class OrderServiceTests
         _payments.AuthorizeDelay = TimeSpan.FromSeconds(10);
         var order = _service.Create();
 
-        await Assert.ThrowsAsync<TimeoutException>(() => _service.AuthorizePaymentAsync(order.Id));
+        await Assert.ThrowsAsync<OrderOutcomeUnknownException>(() => _service.AuthorizePaymentAsync(order.Id));
         Assert.Equal(OrderState.Initialized, order.State);
 
         _payments.AuthorizeDelay = TimeSpan.Zero;
         await _service.AuthorizePaymentAsync(order.Id);
         Assert.Equal(OrderState.PaymentAuthorized, order.State);
+    }
+
+    [Fact]
+    public async Task AuthorizationOutcomeUnknown_IsNotTreatedAsDecline()
+    {
+        // A hold may exist, so rejecting would leave it on the card with nothing to void it.
+        _payments.Authorize = () => OperationResult.Unknown("connection reset");
+        var order = _service.Create();
+
+        await Assert.ThrowsAsync<OrderOutcomeUnknownException>(() => _service.AuthorizePaymentAsync(order.Id));
+        Assert.Equal(OrderState.Initialized, order.State);
+        Assert.Single(order.History);
+    }
+
+    [Fact]
+    public async Task AuthorizationSucceedsWithoutId_IsTreatedAsUnknown()
+    {
+        _payments.Authorize = () => new OperationResult(OperationOutcome.Succeeded);
+        var order = _service.Create();
+
+        await Assert.ThrowsAsync<OrderOutcomeUnknownException>(() => _service.AuthorizePaymentAsync(order.Id));
+        Assert.Equal(OrderState.Initialized, order.State);
+        Assert.Null(order.AuthorizationId);
     }
 
     [Fact]

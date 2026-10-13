@@ -14,7 +14,8 @@ Also:
 - Every gateway call is cancelled after 5s. The request may already have reached the provider,
   so a timeout still counts as an unknown outcome.
 - Actions are serialized per order, so concurrent requests can't double-authorize.
-- Authorization retries are safe because the order ID is the idempotency key.
+- If authorization times out or its outcome is unknown, the order stays `Initialized` and the
+  API returns `503`. Retrying is safe because the order ID is the idempotency key.
 
 ## Running it
 
