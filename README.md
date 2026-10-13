@@ -2,14 +2,6 @@
 
 A .NET 10 service for checkout orders, where failure recovery depends on the stage that failed.
 
-```
-Initialized ──authorize──┬─ declined ─────────────────────► Rejected
-                         └─ ok ─► PaymentAuthorized ──complete──┬─ ok ──────────────────► Complete
-                                                                ├─ failed, void ok ─────► Cancelled
-                                                                ├─ failed, void failed ─► NeedsAttention
-                                                                └─ outcome unknown ─────► NeedsAttention
-```
-
 ## Design
 
 It's the State pattern. `Order` holds an `IOrderState` and forwards `AuthorizePaymentAsync` and
@@ -17,11 +9,6 @@ It's the State pattern. `Order` holds an `IOrderState` and forwards `AuthorizePa
 Everything else throws, which the API returns as a 409. All the states are in
 `Orders/OrderStates.cs`, so you can read the whole machine top to bottom, and all the recovery
 logic lives in `PaymentAuthorizedState`.
-
-One decision I'd defend: **a timeout is not a failure.** If completion times out, the tickets
-may already have been issued, so voiding could hand them out for free. Only a definite failure
-triggers the void. An unknown outcome goes to `NeedsAttention`, with the reason recorded in the
-order's history and logged. If a timeout occurs when an order is initialized, that can safely be retried. The other statuses would go to `NeedsAttention`
 
 Also:
 - Every gateway call is cancelled after 5s. The request may already have reached the provider,
@@ -79,4 +66,17 @@ The VS Code launch configs cover each scenario under the debugger.
   fulfillment, retries and the void, and the client polls `GET /orders/{id}` or gets a push
   notification. The consumer is safe to run twice: it skips orders that are no longer
   `Completing`, and the order ID is the idempotency key with the provider. This also removes the
-  10s request and the crash gap between a failed completion and the void.# order-state-machine
+  10s request and the crash gap between a failed completion and the void.
+
+## How I used AI
+
+I built this with Claude Code. It scaffolded out most of the code and tests. I made the design
+calls and pushed back where its output didn't hold up, ensuring it followed my design and the code made sense along the way.
+
+- **Choosing the design.** I asked for three architectures with pros and cons. It recommended
+  a transition table, which I had it scaffold out as a POC first. I decided that the state pattern would work better, so deleted that code and started fresh following the state pattern instead.
+- **Questioning its explanations.** As I read the code, I asked claude why it did certain things in certain ways. That lead to refactors and rewrites, ensuring that it followed the approach I wanted.
+- **Validating.** Unit tests cover the four required scenarios plus timeouts and concurrency.
+  For the concurrency test, I had it remove the lock to prove the test fails without it. I also
+  had it run the real API under each stub configuration and check every case over HTTP: 62
+  checks. I debugged and tested it myself in VS Code and Swagger, which uncovered some bugs.
