@@ -17,6 +17,9 @@ public class OrderTests
     public static TheoryData<IOrderState> TerminalStates =>
         [new CompleteState(), new RejectedState(), new CancelledState(), new NeedsAttentionState()];
 
+    public static TheoryData<IOrderState> StatesWithoutResolve =>
+        [new InitializedState(), new PaymentAuthorizedState(), new CompleteState(), new RejectedState(), new CancelledState()];
+
     [Theory]
     [MemberData(nameof(TerminalStates))]
     public async Task TerminalStates_AllowNoActions(IOrderState state)
@@ -25,6 +28,16 @@ public class OrderTests
 
         await Assert.ThrowsAsync<InvalidOrderTransitionException>(() => state.AuthorizePaymentAsync(order, _dependencies));
         await Assert.ThrowsAsync<InvalidOrderTransitionException>(() => state.CompleteAsync(order, _dependencies));
+    }
+
+    [Theory]
+    [MemberData(nameof(StatesWithoutResolve))]
+    public async Task OnlyNeedsAttention_AllowsResolve(IOrderState state)
+    {
+        var order = new Order(Guid.NewGuid(), DateTimeOffset.UnixEpoch);
+
+        await Assert.ThrowsAsync<InvalidOrderTransitionException>(
+            () => state.ResolveAsync(order, _dependencies, ResolutionAction.Void, "test"));
     }
 
     [Fact]

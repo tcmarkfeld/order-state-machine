@@ -27,6 +27,10 @@ public sealed class OrderService(OrderDependencies dependencies)
     /// <inheritdoc cref="AuthorizePaymentAsync"/>
     public Task<Order?> CompleteAsync(Guid id) => RunExclusiveAsync(id, order => order.CompleteAsync(dependencies));
 
+    /// <inheritdoc cref="AuthorizePaymentAsync"/>
+    public Task<Order?> ResolveAsync(Guid id, ResolutionAction action, string reason) =>
+        RunExclusiveAsync(id, order => order.ResolveAsync(dependencies, action, reason));
+
     private async Task<Order?> RunExclusiveAsync(Guid id, Func<Order, Task> action)
     {
         if (Get(id) is not { } order)

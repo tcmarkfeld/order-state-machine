@@ -27,6 +27,14 @@ public enum OrderState
     NeedsAttention,
 }
 
+/// <summary>What an operator chooses when resolving an order in <see cref="OrderState.NeedsAttention"/>.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter<ResolutionAction>))]
+public enum ResolutionAction
+{
+    Complete,
+    Void,
+}
+
 public sealed record StateTransition(OrderState? From, OrderState To, DateTimeOffset At, string Reason);
 
 public sealed class InvalidOrderTransitionException(string message) : InvalidOperationException(message);
@@ -55,6 +63,9 @@ public sealed class Order
 
     public string? AuthorizationId { get; internal set; }
 
+    /// <summary>Why the operator resolved the order, from the latest resolve attempt.</summary>
+    public string? ResolutionReason { get; internal set; }
+
     /// <summary>Derived from <see cref="History"/> so a reader can't see a state and history that disagree.</summary>
     public OrderState State => History[^1].To;
 
@@ -70,6 +81,9 @@ public sealed class Order
     public Task AuthorizePaymentAsync(OrderDependencies dependencies) => _state.AuthorizePaymentAsync(this, dependencies);
 
     public Task CompleteAsync(OrderDependencies dependencies) => _state.CompleteAsync(this, dependencies);
+
+    public Task ResolveAsync(OrderDependencies dependencies, ResolutionAction action, string reason) =>
+        _state.ResolveAsync(this, dependencies, action, reason);
 
     /// <summary>Called only by state classes, which are the ones that decide what comes next.</summary>
     internal void MoveTo(IOrderState next, DateTimeOffset at, string reason)

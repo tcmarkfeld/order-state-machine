@@ -16,6 +16,16 @@ Also:
 - Actions are serialized per order, so concurrent requests can't double-authorize.
 - If authorization times out or its outcome is unknown, the order stays `Initialized` and the
   API returns `503`. Retrying is safe because the order ID is the idempotency key.
+- An operator resolves a `NeedsAttention` order with `POST /orders/{id}/resolve` and a body of
+  `{ "action": "Complete" | "Void", "reason": "..." }`. The reason is required and is stored as
+  the order's `resolutionReason`. Resolving first gets the payment status from the provider by
+  idempotency key:
+  - `Complete` requires the payment to be `Authorized` or `Complete`. If fulfillment says the
+    order already completed, it isn't called again. Otherwise fulfillment runs.
+  - `Void` voids an `Authorized` payment, refunds a `Complete` one, and does nothing if the
+    payment is already `Voided`, `Refunded` or `NotFound`. The order ends `Cancelled`.
+  - If any lookup or provider call fails, the order goes back to `NeedsAttention` with the reason
+    in its history, and the resolve can be retried.
 
 ## Running it
 
@@ -27,11 +37,13 @@ dotnet test
 dotnet run --project src/OrderStateMachine.Api --urls http://localhost:5199
 ```
 
-Endpoints: `POST /orders`, `POST /orders/{id}/authorize`, `POST /orders/{id}/complete` and
-`GET /orders/{id}`. In Development, Swagger UI is at `/swagger`.
+Endpoints: `POST /orders`, `POST /orders/{id}/authorize`, `POST /orders/{id}/complete`,
+`POST /orders/{id}/resolve` and `GET /orders/{id}`. In Development, Swagger UI is at `/swagger`.
 
 The payment gateway and fulfillment are mocks. You can force failures with
-`Stubs__DeclinePayment`, `Stubs__FailCompletion` and `Stubs__FailVoid`, for example:
+`Stubs__DeclinePayment`, `Stubs__FailCompletion`, `Stubs__FailVoid`, `Stubs__FailRefund` and
+`Stubs__FailStatusLookup`. `Stubs__PaymentStatus` (default `Authorized`) and
+`Stubs__FulfillmentStatus` (default `NotFound`) set what the status lookups return. For example:
 
 ```bash
 Stubs__FailCompletion=true Stubs__FailVoid=true dotnet run --project src/OrderStateMachine.Api --urls http://localhost:5199
@@ -60,8 +72,7 @@ The VS Code launch configs cover each scenario under the debugger.
   retry, so clients get the original result and creating an order can't duplicate.
 - Retry voids with backoff before giving up to `NeedsAttention`.
 - Reconcile unknown outcomes automatically by asking the provider for the status by idempotency
-  key.
-- Add a `resolve` action on `NeedsAttentionState` so operators can close out stuck orders.
+  key, instead of waiting for an operator to resolve them.
 - Make completion asynchronous. `complete` moves the order to a new `Completing` state, writes a
   `CompletionRequested` event through the outbox, and returns `202 Accepted`. A consumer runs
   fulfillment, retries and the void, and the client polls `GET /orders/{id}` or gets a push
