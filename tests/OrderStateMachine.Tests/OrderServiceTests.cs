@@ -195,5 +195,179 @@ public class OrderServiceTests
     {
         Assert.Null(await _service.AuthorizePaymentAsync(Guid.NewGuid()));
         Assert.Null(await _service.CompleteAsync(Guid.NewGuid()));
+        Assert.Null(await _service.ResolveAsync(Guid.NewGuid(), ResolutionAction.Void, "test"));
+    }
+
+    [Fact]
+    public async Task Resolve_Complete_CompletesOrder()
+    {
+        var order = await CreateOrderNeedingAttentionAsync();
+
+        await _service.ResolveAsync(order.Id, ResolutionAction.Complete, "Tickets restocked");
+
+        Assert.Equal(OrderState.Complete, order.State);
+        Assert.Equal("Tickets restocked", order.ResolutionReason);
+        Assert.Equal(OrderState.NeedsAttention, order.History[^1].From);
+        Assert.Equal([order.Id], _fulfillment.CompleteCalls);
+    }
+
+    [Fact]
+    public async Task Resolve_Complete_FulfillmentAlreadyCompleted_DoesNotCompleteAgain()
+    {
+        var order = await CreateOrderNeedingAttentionAsync();
+        _fulfillment.Status = () => FulfillmentStatus.Completed;
+
+        await _service.ResolveAsync(order.Id, ResolutionAction.Complete, "Tickets were issued");
+
+        Assert.Equal(OrderState.Complete, order.State);
+        Assert.Empty(_fulfillment.CompleteCalls);
+    }
+
+    [Theory]
+    [InlineData(PaymentStatus.NotFound)]
+    [InlineData(PaymentStatus.Voided)]
+    [InlineData(PaymentStatus.Refunded)]
+    public async Task Resolve_Complete_PaymentNotTaken_StaysNeedsAttention(PaymentStatus status)
+    {
+        var order = await CreateOrderNeedingAttentionAsync();
+        _payments.Status = () => status;
+
+        await _service.ResolveAsync(order.Id, ResolutionAction.Complete, "Customer wants tickets");
+
+        Assert.Equal(OrderState.NeedsAttention, order.State);
+        Assert.Contains($"payment is {status}", order.History[^1].Reason);
+        Assert.Empty(_fulfillment.CompleteCalls);
+    }
+
+    [Fact]
+    public async Task Resolve_Complete_CompletionFails_StaysNeedsAttentionAndCanBeRetried()
+    {
+        var order = await CreateOrderNeedingAttentionAsync();
+        _fulfillment.Complete = () => OperationResult.Failure("Tickets no longer available");
+
+        await _service.ResolveAsync(order.Id, ResolutionAction.Complete, "First try");
+
+        Assert.Equal(OrderState.NeedsAttention, order.State);
+        Assert.Equal(OrderState.NeedsAttention, order.History[^1].From);
+        Assert.Contains("completion failed: Tickets no longer available", order.History[^1].Reason);
+
+        _fulfillment.Complete = () => OperationResult.Success("fulfillment_123");
+        await _service.ResolveAsync(order.Id, ResolutionAction.Complete, "Second try");
+
+        Assert.Equal(OrderState.Complete, order.State);
+        Assert.Equal("Second try", order.ResolutionReason);
+    }
+
+    [Fact]
+    public async Task Resolve_Void_PaymentAuthorized_VoidsAndCancels()
+    {
+        var order = await CreateOrderNeedingAttentionAsync();
+
+        await _service.ResolveAsync(order.Id, ResolutionAction.Void, "Customer cancelled");
+
+        Assert.Equal(OrderState.Cancelled, order.State);
+        Assert.Equal(["auth_123"], _payments.VoidCalls);
+        Assert.Empty(_payments.RefundCalls);
+        Assert.Equal("Customer cancelled", order.ResolutionReason);
+    }
+
+    [Fact]
+    public async Task Resolve_Void_PaymentComplete_RefundsAndCancels()
+    {
+        var order = await CreateOrderNeedingAttentionAsync();
+        _payments.Status = () => PaymentStatus.Complete;
+
+        await _service.ResolveAsync(order.Id, ResolutionAction.Void, "Customer was charged");
+
+        Assert.Equal(OrderState.Cancelled, order.State);
+        Assert.Equal(["auth_123"], _payments.RefundCalls);
+        Assert.Empty(_payments.VoidCalls);
+        Assert.Contains("refunded", order.History[^1].Reason);
+    }
+
+    [Theory]
+    [InlineData(PaymentStatus.NotFound)]
+    [InlineData(PaymentStatus.Voided)]
+    [InlineData(PaymentStatus.Refunded)]
+    public async Task Resolve_Void_NothingToRelease_Cancels(PaymentStatus status)
+    {
+        var order = await CreateOrderNeedingAttentionAsync();
+        _payments.Status = () => status;
+
+        await _service.ResolveAsync(order.Id, ResolutionAction.Void, "Already released");
+
+        Assert.Equal(OrderState.Cancelled, order.State);
+        Assert.Empty(_payments.VoidCalls);
+        Assert.Empty(_payments.RefundCalls);
+    }
+
+    [Fact]
+    public async Task Resolve_Void_RefundFails_StaysNeedsAttention()
+    {
+        var order = await CreateOrderNeedingAttentionAsync();
+        _payments.Status = () => PaymentStatus.Complete;
+        _payments.Refund = () => OperationResult.Failure("Refund rejected by payment provider");
+
+        await _service.ResolveAsync(order.Id, ResolutionAction.Void, "Customer was charged");
+
+        Assert.Equal(OrderState.NeedsAttention, order.State);
+        Assert.Contains("refund of payment auth_123 failed: Refund rejected by payment provider", order.History[^1].Reason);
+    }
+
+    [Theory]
+    [InlineData(ResolutionAction.Complete)]
+    [InlineData(ResolutionAction.Void)]
+    public async Task Resolve_PaymentStatusLookupThrows_StaysNeedsAttention(ResolutionAction action)
+    {
+        var order = await CreateOrderNeedingAttentionAsync();
+        _payments.Status = () => throw new HttpRequestException("connection reset");
+
+        await _service.ResolveAsync(order.Id, action, "Trying");
+
+        Assert.Equal(OrderState.NeedsAttention, order.State);
+        Assert.Contains("payment status lookup failed", order.History[^1].Reason);
+        Assert.Contains("connection reset", order.History[^1].Reason);
+        Assert.Empty(_payments.VoidCalls);
+        Assert.Empty(_fulfillment.CompleteCalls);
+    }
+
+    [Fact]
+    public async Task Resolve_Complete_FulfillmentStatusLookupThrows_StaysNeedsAttention()
+    {
+        var order = await CreateOrderNeedingAttentionAsync();
+        _fulfillment.Status = () => throw new HttpRequestException("connection reset");
+
+        await _service.ResolveAsync(order.Id, ResolutionAction.Complete, "Trying");
+
+        Assert.Equal(OrderState.NeedsAttention, order.State);
+        Assert.Contains("fulfillment status lookup failed", order.History[^1].Reason);
+        Assert.Empty(_fulfillment.CompleteCalls);
+    }
+
+    [Fact]
+    public async Task ResolvingOutsideNeedsAttention_Throws()
+    {
+        var order = _service.Create();
+
+        await Assert.ThrowsAsync<InvalidOrderTransitionException>(
+            () => _service.ResolveAsync(order.Id, ResolutionAction.Void, "test"));
+        Assert.Single(order.History);
+    }
+
+    /// <summary>Completion and its void both fail, then the fakes are reset to succeed.</summary>
+    private async Task<Order> CreateOrderNeedingAttentionAsync()
+    {
+        _fulfillment.Complete = () => OperationResult.Failure("Tickets no longer available");
+        _payments.Void = () => OperationResult.Failure("Void rejected by payment provider");
+        var order = _service.Create();
+        await _service.AuthorizePaymentAsync(order.Id);
+        await _service.CompleteAsync(order.Id);
+        Assert.Equal(OrderState.NeedsAttention, order.State);
+
+        _fulfillment.Complete = () => OperationResult.Success("fulfillment_123");
+        _payments.Void = () => OperationResult.Success("auth_123");
+        _fulfillment.CompleteCalls.Clear();
+        _payments.VoidCalls.Clear();
+        return order;
     }
 }

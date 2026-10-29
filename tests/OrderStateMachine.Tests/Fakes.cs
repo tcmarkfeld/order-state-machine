@@ -11,6 +11,9 @@ public sealed class FakePaymentGateway : IPaymentGateway
     public int AuthorizeCalls => _authorizeCalls;
     public Func<OperationResult> Void { get; set; } = () => OperationResult.Success("auth_123");
     public List<string> VoidCalls { get; } = [];
+    public Func<OperationResult> Refund { get; set; } = () => OperationResult.Success("auth_123");
+    public List<string> RefundCalls { get; } = [];
+    public Func<PaymentStatus> Status { get; set; } = () => PaymentStatus.Authorized;
 
     public async Task<OperationResult> AuthorizeAsync(Guid orderId, CancellationToken cancellationToken)
     {
@@ -24,6 +27,14 @@ public sealed class FakePaymentGateway : IPaymentGateway
         VoidCalls.Add(authorizationId);
         return Task.FromResult(Void());
     }
+
+    public Task<OperationResult> RefundAsync(string authorizationId, CancellationToken cancellationToken)
+    {
+        RefundCalls.Add(authorizationId);
+        return Task.FromResult(Refund());
+    }
+
+    public Task<PaymentStatus> GetStatusAsync(Guid orderId, CancellationToken cancellationToken) => Task.FromResult(Status());
 }
 
 public sealed class FakeOrderFulfillment : IOrderFulfillment
@@ -31,6 +42,8 @@ public sealed class FakeOrderFulfillment : IOrderFulfillment
     public Func<OperationResult> Complete { get; set; } = () => OperationResult.Success("fulfillment_123");
     public TimeSpan CompleteDelay { get; set; }
     public bool CompleteCancelled { get; private set; }
+    public List<Guid> CompleteCalls { get; } = [];
+    public Func<FulfillmentStatus> Status { get; set; } = () => FulfillmentStatus.NotFound;
 
     public async Task<OperationResult> CompleteAsync(Guid orderId, CancellationToken cancellationToken)
     {
@@ -44,8 +57,11 @@ public sealed class FakeOrderFulfillment : IOrderFulfillment
             throw;
         }
 
+        CompleteCalls.Add(orderId);
         return Complete();
     }
+
+    public Task<FulfillmentStatus> GetStatusAsync(Guid orderId, CancellationToken cancellationToken) => Task.FromResult(Status());
 }
 
 /// <summary>Moves forward one second per read so each history entry gets a distinct, predictable timestamp.</summary>

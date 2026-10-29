@@ -13,6 +13,8 @@ public interface IOrderState
     Task AuthorizePaymentAsync(Order order, OrderDependencies dependencies);
 
     Task CompleteAsync(Order order, OrderDependencies dependencies);
+
+    Task ResolveAsync(Order order, OrderDependencies dependencies, ResolutionAction action, string reason);
 }
 
 /// <summary>
@@ -29,8 +31,17 @@ public abstract class OrderStateBase : IOrderState
     public virtual Task CompleteAsync(Order order, OrderDependencies dependencies) =>
         throw NotAllowed(order, "complete");
 
+    public virtual Task ResolveAsync(Order order, OrderDependencies dependencies, ResolutionAction action, string reason) =>
+        throw NotAllowed(order, "resolve");
+
     private InvalidOrderTransitionException NotAllowed(Order order, string action) =>
         new($"Cannot {action} for order {order.Id} while it is {Name}.");
+
+    protected static void FlagForAttention(Order order, OrderDependencies dependencies, string reason)
+    {
+        order.MoveTo(new NeedsAttentionState(), dependencies.Now, reason);
+        dependencies.Logger.LogError("Order {OrderId} needs manual resolution: {Reason}", order.Id, reason);
+    }
 }
 
 public sealed class InitializedState : OrderStateBase
@@ -109,12 +120,6 @@ public sealed class PaymentAuthorizedState : OrderStateBase
             dependencies,
             $"Completion failed: {completion.Error}. Void of payment {authorizationId} {(voided.Outcome == OperationOutcome.Unknown ? "outcome unknown" : "failed")}: {voided.Error}.");
     }
-
-    private static void FlagForAttention(Order order, OrderDependencies dependencies, string reason)
-    {
-        order.MoveTo(new NeedsAttentionState(), dependencies.Now, reason);
-        dependencies.Logger.LogError("Order {OrderId} needs manual resolution: {Reason}", order.Id, reason);
-    }
 }
 
 // Terminal states allow no actions, so they inherit OrderStateBase's "not allowed" defaults.
@@ -134,8 +139,97 @@ public sealed class CancelledState : OrderStateBase
     public override OrderState Name => OrderState.Cancelled;
 }
 
-/// <summary>Terminal for automation. A manual-resolution action would be added here as an override.</summary>
+/// <summary>
+/// Automation stopped here, so an operator decides whether to complete or void the order. Both
+/// check the providers by idempotency key first, and any failure leaves the order here with the
+/// reason in its history, so the resolve can be retried.
+/// </summary>
 public sealed class NeedsAttentionState : OrderStateBase
 {
     public override OrderState Name => OrderState.NeedsAttention;
+
+    public override async Task ResolveAsync(Order order, OrderDependencies dependencies, ResolutionAction action, string reason)
+    {
+        order.ResolutionReason = reason;
+
+        var (payment, error) = await dependencies.LookupSafelyAsync(ct => dependencies.Payments.GetStatusAsync(order.Id, ct));
+        if (payment is not { } paymentStatus)
+        {
+            FlagForAttention(order, dependencies, $"Resolve ({action}) failed: payment status lookup failed: {error}.");
+            return;
+        }
+
+        if (action == ResolutionAction.Complete)
+        {
+            await ResolveByCompletingAsync(order, dependencies, paymentStatus);
+        }
+        else
+        {
+            await ResolveByVoidingAsync(order, dependencies, paymentStatus);
+        }
+    }
+
+    private static async Task ResolveByCompletingAsync(Order order, OrderDependencies dependencies, PaymentStatus payment)
+    {
+        if (payment is not (PaymentStatus.Authorized or PaymentStatus.Complete))
+        {
+            FlagForAttention(order, dependencies, $"Resolve (Complete) failed: payment is {payment}.");
+            return;
+        }
+
+        var (fulfillment, error) = await dependencies.LookupSafelyAsync(ct => dependencies.Fulfillment.GetStatusAsync(order.Id, ct));
+        if (fulfillment is null)
+        {
+            FlagForAttention(order, dependencies, $"Resolve (Complete) failed: fulfillment status lookup failed: {error}.");
+            return;
+        }
+
+        if (fulfillment == FulfillmentStatus.Completed)
+        {
+            order.MoveTo(new CompleteState(), dependencies.Now, "Resolved: fulfillment had already completed");
+            return;
+        }
+
+        var completion = await dependencies.CallSafelyAsync(ct => dependencies.Fulfillment.CompleteAsync(order.Id, ct));
+        if (completion.Succeeded)
+        {
+            order.MoveTo(new CompleteState(), dependencies.Now, "Resolved: order completed");
+            return;
+        }
+
+        FlagForAttention(
+            order,
+            dependencies,
+            $"Resolve (Complete) failed: completion {(completion.Outcome == OperationOutcome.Unknown ? "outcome unknown" : "failed")}: {completion.Error}.");
+    }
+
+    private static async Task ResolveByVoidingAsync(Order order, OrderDependencies dependencies, PaymentStatus payment)
+    {
+        if (payment is not (PaymentStatus.Authorized or PaymentStatus.Complete))
+        {
+            // Voided, refunded or never created: no money to release.
+            order.MoveTo(new CancelledState(), dependencies.Now, $"Resolved: payment was {payment}, nothing to release");
+            return;
+        }
+
+        // A completed payment means the customer was charged, so it has to be refunded rather than voided.
+        var refund = payment == PaymentStatus.Complete;
+        var authorizationId = order.AuthorizationId!;
+        var result = await dependencies.CallSafelyAsync(ct => refund
+            ? dependencies.Payments.RefundAsync(authorizationId, ct)
+            : dependencies.Payments.VoidAsync(authorizationId, ct));
+        if (result.Succeeded)
+        {
+            order.MoveTo(
+                new CancelledState(),
+                dependencies.Now,
+                $"Resolved: payment {authorizationId} {(refund ? "refunded" : "voided")}");
+            return;
+        }
+
+        FlagForAttention(
+            order,
+            dependencies,
+            $"Resolve (Void) failed: {(refund ? "refund" : "void")} of payment {authorizationId} {(result.Outcome == OperationOutcome.Unknown ? "outcome unknown" : "failed")}: {result.Error}.");
+    }
 }

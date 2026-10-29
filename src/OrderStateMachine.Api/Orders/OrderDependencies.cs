@@ -32,7 +32,7 @@ public sealed class OrderDependencies(
     /// cancel a void halfway through. Cancelling only stops our side: a request that already
     /// reached the provider may still be processed, which is why a timeout is an unknown outcome.
     /// </remarks>
-    private async Task<OperationResult> CallAsync(Func<CancellationToken, Task<OperationResult>> call)
+    private async Task<T> CallAsync<T>(Func<CancellationToken, Task<T>> call)
     {
         using var timeout = new CancellationTokenSource(GatewayTimeout, clock);
         try
@@ -63,6 +63,27 @@ public sealed class OrderDependencies(
         catch (Exception ex)
         {
             return OperationResult.Unknown($"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Runs a status lookup under the same timeout. Returns a null status and the error if the
+    /// provider threw or didn't answer in time.
+    /// </summary>
+    public async Task<(TStatus? Status, string? Error)> LookupSafelyAsync<TStatus>(Func<CancellationToken, Task<TStatus>> lookup)
+        where TStatus : struct
+    {
+        try
+        {
+            return (await CallAsync(lookup), null);
+        }
+        catch (TimeoutException ex)
+        {
+            return (null, ex.Message);
+        }
+        catch (Exception ex)
+        {
+            return (null, $"{ex.GetType().Name}: {ex.Message}");
         }
     }
 }

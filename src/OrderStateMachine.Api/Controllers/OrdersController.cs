@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using Microsoft.AspNetCore.Mvc;
 using OrderStateMachine.Api.Orders;
 
@@ -12,6 +13,7 @@ public sealed class OrdersController(OrderService orders) : ControllerBase
     public ActionResult<OrderResponse> Create()
     {
         var order = orders.Create();
+
         return CreatedAtAction(nameof(GetOrder), new { id = order.Id }, OrderResponse.From(order));
     }
 
@@ -36,6 +38,15 @@ public sealed class OrdersController(OrderService orders) : ControllerBase
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     public Task<ActionResult<OrderResponse>> Complete(Guid id) => RunAsync(() => orders.CompleteAsync(id));
 
+    /// <summary>NeedsAttention → Complete or Cancelled, or back to NeedsAttention with the reason if it fails and can be retried.</summary>
+    [HttpPost("{id:guid}/resolve")]
+    [ProducesResponseType<OrderResponse>(StatusCodes.Status200OK)]
+    [ProducesResponseType<ValidationProblemDetails>(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
+    public Task<ActionResult<OrderResponse>> Resolve(Guid id, ResolveOrderRequest request) =>
+        RunAsync(() => orders.ResolveAsync(id, request.Action!.Value, request.Reason));
+
     private async Task<ActionResult<OrderResponse>> RunAsync(Func<Task<Order?>> action)
     {
         try
@@ -53,16 +64,20 @@ public sealed class OrdersController(OrderService orders) : ControllerBase
     }
 }
 
+// Action is nullable so a missing value fails validation instead of defaulting to Complete.
+public sealed record ResolveOrderRequest([Required] ResolutionAction? Action, [Required] string Reason);
+
 public sealed record OrderResponse(
     Guid Id,
     OrderState State,
     string? AuthorizationId,
+    string? ResolutionReason,
     IReadOnlyList<StateTransition> History)
 {
     public static OrderResponse From(Order order)
     {
         // Read History once so State and History come from the same snapshot.
         var history = order.History;
-        return new(order.Id, history[^1].To, order.AuthorizationId, history);
+        return new(order.Id, history[^1].To, order.AuthorizationId, order.ResolutionReason, history);
     }
 }

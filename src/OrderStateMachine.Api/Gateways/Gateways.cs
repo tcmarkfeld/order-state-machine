@@ -10,12 +10,39 @@ public interface IPaymentGateway
 
     /// <summary>Releases a hold created by <see cref="AuthorizeAsync"/>.</summary>
     Task<OperationResult> VoidAsync(string authorizationId, CancellationToken cancellationToken);
+
+    /// <summary>Returns money already taken for a payment the customer completed.</summary>
+    Task<OperationResult> RefundAsync(string authorizationId, CancellationToken cancellationToken);
+
+    /// <summary>Looks up the payment by its idempotency key. Throws if the provider can't answer.</summary>
+    Task<PaymentStatus> GetStatusAsync(Guid orderId, CancellationToken cancellationToken);
+}
+
+public enum PaymentStatus
+{
+    NotFound,
+    Authorized,
+
+    /// <summary>The customer has paid.</summary>
+    Complete,
+    Voided,
+    Refunded,
 }
 
 /// <summary>Completes the order after payment is authorized, e.g. capturing payment and issuing tickets.</summary>
 public interface IOrderFulfillment
 {
     Task<OperationResult> CompleteAsync(Guid orderId, CancellationToken cancellationToken);
+
+    /// <summary>Looks up the order by its idempotency key. Throws if the provider can't answer.</summary>
+    Task<FulfillmentStatus> GetStatusAsync(Guid orderId, CancellationToken cancellationToken);
+}
+
+public enum FulfillmentStatus
+{
+    NotFound,
+    Completed,
+    Failed,
 }
 
 public enum OperationOutcome
